@@ -34,9 +34,23 @@ function getClientIp(req) {
 }
 
 function send(ws, data) {
-    if (ws.readyState === WebSocket.OPEN) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(data));
     }
+}
+
+/*
+ * Send current active user count to everyone.
+ */
+function broadcastActiveUsers() {
+    const count = users.size;
+
+    users.forEach((user, ws) => {
+        send(ws, {
+            type: "active_users",
+            count: count
+        });
+    });
 }
 
 function removeFromQueue(ws) {
@@ -47,8 +61,25 @@ function removeFromQueue(ws) {
     }
 }
 
-function findUser(ws) {
-    return users.get(ws);
+function stopTyping(ws) {
+    const user = users.get(ws);
+
+    if (!user) {
+        return;
+    }
+
+    if (!user.typing) {
+        return;
+    }
+
+    user.typing = false;
+
+    if (user.partner) {
+        send(user.partner, {
+            type: "typing",
+            typing: false
+        });
+    }
 }
 
 function disconnectFromPartner(ws) {
@@ -58,6 +89,9 @@ function disconnectFromPartner(ws) {
         return;
     }
 
+    // Stop typing before disconnecting.
+    stopTyping(ws);
+
     const partner = user.partner;
 
     user.partner = null;
@@ -65,7 +99,14 @@ function disconnectFromPartner(ws) {
     if (users.has(partner)) {
         const partnerUser = users.get(partner);
 
+        // Stop partner typing state too.
         partnerUser.partner = null;
+        partnerUser.typing = false;
+
+        send(partner, {
+            type: "typing",
+            typing: false
+        });
 
         send(partner, {
             type: "partner_left"
@@ -82,7 +123,7 @@ function findStranger(ws) {
 
     removeFromQueue(ws);
 
-    // Already connected
+    // Already connected.
     if (user.partner) {
         return;
     }
@@ -109,7 +150,12 @@ function findStranger(ws) {
         }
 
         user.partner = stranger;
+        user.searching = false;
+        user.typing = false;
+
         strangerUser.partner = ws;
+        strangerUser.searching = false;
+        strangerUser.typing = false;
 
         send(ws, {
             type: "matched"
@@ -130,6 +176,7 @@ function findStranger(ws) {
 }
 
 wss.on("connection", (ws, req) => {
+
     const ip = getClientIp(req);
 
     console.log("Connected:", ip);
@@ -137,14 +184,20 @@ wss.on("connection", (ws, req) => {
     users.set(ws, {
         ip: ip,
         partner: null,
-        searching: false
+        searching: false,
+        typing: false
     });
 
+    // Tell newly connected user that connection is ready.
     send(ws, {
         type: "connected"
     });
 
+    // Send current active user count.
+    broadcastActiveUsers();
+
     ws.on("message", (raw) => {
+
         let data;
 
         try {
@@ -161,6 +214,10 @@ wss.on("connection", (ws, req) => {
 
         switch (data.type) {
 
+            // =====================================================
+            // START
+            // =====================================================
+
             case "start":
 
                 if (user.partner) {
@@ -173,32 +230,80 @@ wss.on("connection", (ws, req) => {
 
                 break;
 
+
+            // =====================================================
+            // MESSAGE
+            // =====================================================
+
             case "message":
 
                 if (!user.partner) {
                     return;
                 }
 
+                const messageText = String(data.text || "").trim();
+
+                if (messageText.length === 0) {
+                    return;
+                }
+
+                // Stop typing when message is sent.
+                stopTyping(ws);
+
                 send(user.partner, {
                     type: "message",
-                    text: String(data.text || "")
+                    text: messageText
                 });
 
                 break;
 
+
+            // =====================================================
+            // TYPING
+            // =====================================================
+
+            case "typing":
+
+                if (!user.partner) {
+                    return;
+                }
+
+                const isTyping = data.typing === true;
+
+                user.typing = isTyping;
+
+                send(user.partner, {
+                    type: "typing",
+                    typing: isTyping
+                });
+
+                break;
+
+
+            // =====================================================
+            // SKIP
+            // =====================================================
+
             case "skip":
 
-                // Remove current connection.
+                stopTyping(ws);
+
                 disconnectFromPartner(ws);
 
                 user.searching = true;
 
-                // Automatically search again.
                 findStranger(ws);
 
                 break;
 
+
+            // =====================================================
+            // STOP
+            // =====================================================
+
             case "stop":
+
+                stopTyping(ws);
 
                 removeFromQueue(ws);
 
@@ -214,17 +319,32 @@ wss.on("connection", (ws, req) => {
         }
     });
 
+
+    // =============================================================
+    // DISCONNECT
+    // =============================================================
+
     ws.on("close", () => {
+
         console.log("Disconnected:", ip);
+
+        stopTyping(ws);
 
         removeFromQueue(ws);
 
         disconnectFromPartner(ws);
 
         users.delete(ws);
+
+        // Update everyone after disconnect.
+        broadcastActiveUsers();
     });
 });
 
-server.listen(PORT, () => {
-    console.log(`Stranger Chat server running on port ${PORT}`);
+
+// Important for Render.
+server.listen(PORT, "0.0.0.0", () => {
+    console.log(
+        `Stranger Chat server running on port ${PORT}`
+    );
 });
