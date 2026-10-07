@@ -272,21 +272,18 @@ function sendChatMessage(ws, data) {
     }
 
     const messageId = generateId();
+    const clientMessageId =
+        String(data.clientMessageId || "");
 
     const timestamp = Date.now();
-
-    const replyTo =
-        data.replyTo || null;
+    const replyTo = data.replyTo || null;
 
     const message = {
         type: "message",
-
         messageId: messageId,
-
+        clientMessageId: clientMessageId,
         text: text,
-
         timestamp: timestamp,
-
         replyTo: replyTo
     };
 
@@ -297,6 +294,7 @@ function sendChatMessage(ws, data) {
     send(ws, {
         type: "message_sent",
         messageId: messageId,
+        clientMessageId: clientMessageId,
         timestamp: timestamp
     });
 }
